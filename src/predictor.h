@@ -30,6 +30,7 @@ extern const char *email;
 #define GSHARE      1
 #define TOURNAMENT  2
 #define CUSTOM      3
+#define TAGE        4  // Add this line
 extern const char *bpName[];
 
 // Definitions for 2-bit counters

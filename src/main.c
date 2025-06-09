@@ -26,9 +26,10 @@ usage()
   fprintf(stderr," --verbose    Print predictions on stdout\n");
   fprintf(stderr," --<type>     Branch prediction scheme:\n");
   fprintf(stderr,"    static\n"
-                 "    gshare:<# ghistory>\n"
-                 "    tournament:<# ghistory>:<# lhistory>:<# index>\n"
-                 "    custom\n");
+                "    gshare:<# ghistory>\n"
+                "    tournament:<# ghistory>:<# lhistory>:<# index>\n"
+                "    custom\n"
+                "    tage\n");  
 }
 
 // Process an option and update the predictor
@@ -49,6 +50,8 @@ handle_option(char *arg)
     sscanf(arg+13,"%d:%d:%d", &ghistoryBits, &lhistoryBits, &pcIndexBits);
   } else if (!strcmp(arg,"--custom")) {
     bpType = CUSTOM;
+  } else if (!strcmp(arg,"--tage")) {
+  bpType = TAGE;
   } else if (!strcmp(arg,"--verbose")) {
     verbose = 1;
   } else {

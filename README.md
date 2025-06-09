@@ -221,3 +221,9 @@ We first ensure that your code is compatible with our autograder. If your code f
 Once you pass the compatibility test, we grade the output produced by your code. You will be able to see your score on some of our test cases, but some will be hidden. Your overall grade will not be visible until after the project's due date.
 
 **Note:** Gradescope expects pass/fail tests but we will be reporting percentages. If you don't score 100%, Gradescope considers it a failed tests. Do not be concerned when you see failed tests (but be concerned if your score is low and re-submit)
+
+##
+
+```
+bash run.sh
+```

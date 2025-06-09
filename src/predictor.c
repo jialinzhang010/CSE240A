@@ -20,8 +20,8 @@ const char *email       = "jiz282@ucsd.edu";
 //------------------------------------//
 
 // Handy Global for use in output routines
-const char *bpName[4] = { "Static", "Gshare",
-                          "Tournament", "Custom" };
+const char *bpName[5] = { "Static", "Gshare",
+                          "Tournament", "Custom", "TAGE" };
 
 int ghistoryBits; // Number of bits used for Global History
 int lhistoryBits; // Number of bits used for Local History
@@ -66,9 +66,65 @@ uint8_t update_counter(uint8_t counter, uint8_t outcome) {
     else return (counter > SN) ? counter - 1 : SN;
 }
 
+
+
+// Add TAGE data structures after the Custom section
+// TAGE Predictor Configuration
+#define TAGE_NUM_COMPONENTS 4      // Reduced to 3 tagged tables + base
+#define TAGE_BASE_BITS 11          // Reduced to 2K entries
+#define TAGE_TAG_WIDTH 8           // Reduced tag width
+#define TAGE_USEFUL_BITS 2         // Keep same
+#define TAGE_TABLE_BITS 10         // 1K entries per tagged table
+
+// TAGE table entry structure
+typedef struct {
+    uint8_t ctr;       // 3-bit prediction counter
+    uint16_t tag;      // Tag for partial matching
+    uint8_t useful;    // 2-bit useful counter
+} tage_entry_t;
+
+// TAGE predictor state
+typedef struct {
+    uint8_t *base_predictor;              // Bimodal base predictor
+    tage_entry_t **tables;                // Tagged tables
+    int *history_lengths;                 // History lengths for each table
+    int *table_sizes;                     // Size of each table
+    uint64_t global_history;              // Global history register
+    int *table_indices;                   // Current indices for each table
+    uint16_t *table_tags;                 // Current tags for each table
+    int provider_component;               // Which component provided prediction
+    int altpred_component;                // Alternative prediction component
+    uint8_t provider_pred;                // Provider's prediction
+    uint8_t altpred;                      // Alternative prediction
+} tage_predictor_t;
+
+tage_predictor_t tage;
+
+
 //------------------------------------//
 //        Predictor Functions         //
 //------------------------------------//
+
+// TAGE helper functions
+uint32_t tage_hash(uint32_t pc, uint64_t history, int hist_len) {
+    uint64_t result = pc;
+    for (int i = 0; i < hist_len; i++) {
+        if (history & (1ULL << i)) {
+            result ^= (pc >> (i % 16));
+        }
+    }
+    return result;
+}
+
+uint16_t tage_compute_tag(uint32_t pc, uint64_t history, int hist_len) {
+    uint32_t tag = pc ^ (pc >> hist_len);
+    uint64_t hist_compressed = history;
+    for (int i = 0; i < hist_len; i += TAGE_TAG_WIDTH) {
+        tag ^= (hist_compressed & ((1 << TAGE_TAG_WIDTH) - 1));
+        hist_compressed >>= TAGE_TAG_WIDTH;
+    }
+    return tag & ((1 << TAGE_TAG_WIDTH) - 1);
+}
 
 // Initialize the predictor
 //
@@ -110,6 +166,45 @@ void init_predictor()
       for (int i = 0; i < LOCAL_PHT_SIZE; i++) local_bht[i] = WN;
       for (int i = 0; i < LOCAL_HISTORY_TABLE_SIZE; i++) local_history_table[i] = 0;
       break;
+
+    case TAGE:
+    // Initialize history lengths (adjusted for 4 components)
+    tage.history_lengths = (int*)malloc(sizeof(int) * TAGE_NUM_COMPONENTS);
+    tage.history_lengths[0] = 0;   // Base predictor
+    tage.history_lengths[1] = 4;   // Shorter histories
+    tage.history_lengths[2] = 16;
+    tage.history_lengths[3] = 100;
+    
+    // Initialize table sizes
+    tage.table_sizes = (int*)malloc(sizeof(int) * TAGE_NUM_COMPONENTS);
+    tage.table_sizes[0] = 1 << TAGE_BASE_BITS;  // 2K entries for base
+    for (int i = 1; i < TAGE_NUM_COMPONENTS; i++) {
+      tage.table_sizes[i] = 1 << TAGE_TABLE_BITS;  // 1K entries
+    }
+    
+    // Allocate base predictor
+    tage.base_predictor = (uint8_t*)malloc(sizeof(uint8_t) * tage.table_sizes[0]);
+    for (int i = 0; i < tage.table_sizes[0]; i++) {
+      tage.base_predictor[i] = WN;
+    }
+    
+    // Allocate tagged tables
+    tage.tables = (tage_entry_t**)malloc(sizeof(tage_entry_t*) * TAGE_NUM_COMPONENTS);
+    for (int i = 1; i < TAGE_NUM_COMPONENTS; i++) {
+      tage.tables[i] = (tage_entry_t*)malloc(sizeof(tage_entry_t) * tage.table_sizes[i]);
+      for (int j = 0; j < tage.table_sizes[i]; j++) {
+        tage.tables[i][j].ctr = WN;
+        tage.tables[i][j].tag = 0;
+        tage.tables[i][j].useful = 0;
+      }
+    }
+    
+    // Initialize other state
+    tage.global_history = 0;
+    tage.table_indices = (int*)malloc(sizeof(int) * TAGE_NUM_COMPONENTS);
+    tage.table_tags = (uint16_t*)malloc(sizeof(uint16_t) * TAGE_NUM_COMPONENTS);
+    break;
+
   }
 }
 
@@ -153,6 +248,50 @@ make_prediction(uint32_t pc)
       uint8_t global_pred = get_prediction(global_bht[global_idx]);
 
       return (choice_table[global_idx] >= WT) ? global_pred : local_pred;
+    }
+    case TAGE: {
+      // Compute indices and tags for all components
+      tage.table_indices[0] = pc & (tage.table_sizes[0] - 1);
+      for (int i = 1; i < TAGE_NUM_COMPONENTS; i++) {
+        uint32_t index = tage_hash(pc, tage.global_history, tage.history_lengths[i]);
+        tage.table_indices[i] = index & (tage.table_sizes[i] - 1);
+        tage.table_tags[i] = tage_compute_tag(pc, tage.global_history, tage.history_lengths[i]);
+      }
+      
+      // Find longest matching component
+      tage.provider_component = 0;
+      tage.altpred_component = 0;
+      
+      for (int i = TAGE_NUM_COMPONENTS - 1; i > 0; i--) {
+        if (tage.tables[i][tage.table_indices[i]].tag == tage.table_tags[i]) {
+          tage.provider_component = i;
+          break;
+        }
+      }
+      
+      // Find alternative prediction
+      for (int i = tage.provider_component - 1; i >= 0; i--) {
+        if (i == 0 || tage.tables[i][tage.table_indices[i]].tag == tage.table_tags[i]) {
+          tage.altpred_component = i;
+          break;
+        }
+      }
+      
+      // Get predictions
+      if (tage.provider_component == 0) {
+        tage.provider_pred = tage.base_predictor[tage.table_indices[0]] >= WT ? TAKEN : NOTTAKEN;
+      } else {
+        tage.provider_pred = tage.tables[tage.provider_component][tage.table_indices[tage.provider_component]].ctr >= 4 ? TAKEN : NOTTAKEN;
+      }
+      
+      if (tage.altpred_component == 0) {
+        tage.altpred = tage.base_predictor[tage.table_indices[0]] >= WT ? TAKEN : NOTTAKEN;
+      } else {
+        tage.altpred = tage.tables[tage.altpred_component][tage.table_indices[tage.altpred_component]].ctr >= 4 ? TAKEN : NOTTAKEN;
+      }
+      
+      // Use provider prediction
+      return tage.provider_pred;
     }
     default:
       break;
@@ -231,6 +370,71 @@ void train_predictor(uint32_t pc, uint8_t outcome)
       global_history = ((global_history << 1) | outcome) & (GLOBAL_PHT_SIZE - 1);
       break;
     }
+
+    case TAGE: {
+    // Update provider component
+    if (tage.provider_component == 0) {
+      // Update base predictor
+      if (outcome == TAKEN) {
+        if (tage.base_predictor[tage.table_indices[0]] < ST)
+          tage.base_predictor[tage.table_indices[0]]++;
+      } else {
+        if (tage.base_predictor[tage.table_indices[0]] > SN)
+          tage.base_predictor[tage.table_indices[0]]--;
+      }
+    } else {
+      // Update tagged table entry
+      tage_entry_t *entry = &tage.tables[tage.provider_component][tage.table_indices[tage.provider_component]];
+      if (outcome == TAKEN) {
+        if (entry->ctr < 7) entry->ctr++;
+      } else {
+        if (entry->ctr > 0) entry->ctr--;
+      }
+      
+      // Update useful counter
+      if (tage.provider_pred != tage.altpred) {
+        if (tage.provider_pred == outcome && entry->useful < 3) {
+          entry->useful++;
+        } else if (tage.provider_pred != outcome && entry->useful > 0) {
+          entry->useful--;
+        }
+      }
+    }
+    
+    // Allocate new entries on misprediction
+    if (tage.provider_pred != outcome) {
+      // Find a table to allocate in
+      for (int i = tage.provider_component + 1; i < TAGE_NUM_COMPONENTS; i++) {
+        tage_entry_t *entry = &tage.tables[i][tage.table_indices[i]];
+        
+        // Check if entry is available (useful == 0)
+        if (entry->useful == 0) {
+          entry->tag = tage.table_tags[i];
+          entry->ctr = (outcome == TAKEN) ? 4 : 3;
+          entry->useful = 0;
+          break;
+        }
+      }
+      
+      // Decay useful counters periodically
+      if ((tage.global_history & 0xFF) == 0xFF) {
+        for (int i = 1; i < TAGE_NUM_COMPONENTS; i++) {
+          for (int j = 0; j < tage.table_sizes[i]; j++) {
+            if (tage.tables[i][j].useful > 0) {
+              tage.tables[i][j].useful--;
+            }
+          }
+        }
+      }
+    }
+    
+    // Update global history
+    tage.global_history = (tage.global_history << 1) | outcome;
+    break;
   }
+    default:
+      break;
+  }
+
 }
 
