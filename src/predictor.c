@@ -48,6 +48,24 @@ uint8_t *local_bht;
 uint8_t *global_bht;
 uint8_t *choice_table;
 
+// Custom
+#define GLOBAL_HIST_BITS 13
+#define LOCAL_HIST_BITS 8
+#define LOCAL_PHT_SIZE (1 << LOCAL_HIST_BITS)
+#define GLOBAL_PHT_SIZE (1 << GLOBAL_HIST_BITS)
+#define LOCAL_HISTORY_TABLE_SIZE 1024
+
+uint16_t global_history = 0;
+
+uint8_t get_prediction(uint8_t counter) {
+    return counter >= WT ? TAKEN : NOTTAKEN;
+}
+
+uint8_t update_counter(uint8_t counter, uint8_t outcome) {
+    if (outcome == TAKEN) return (counter < ST) ? counter + 1 : ST;
+    else return (counter > SN) ? counter - 1 : SN;
+}
+
 //------------------------------------//
 //        Predictor Functions         //
 //------------------------------------//
@@ -80,6 +98,17 @@ void init_predictor()
       break;
 
     case CUSTOM:
+      global_bht = (uint8_t *)malloc(sizeof(uint8_t) * GLOBAL_PHT_SIZE);
+      choice_table = (uint8_t *)malloc(sizeof(uint8_t) * GLOBAL_PHT_SIZE);
+      local_bht = (uint8_t *)malloc(sizeof(uint8_t) * LOCAL_PHT_SIZE);
+      local_history_table = (uint32_t *)malloc(sizeof(uint32_t) * LOCAL_HISTORY_TABLE_SIZE);
+
+      for (int i = 0; i < GLOBAL_PHT_SIZE; i++) {
+        global_bht[i] = WN;
+        choice_table[i] = WT;
+      }
+      for (int i = 0; i < LOCAL_PHT_SIZE; i++) local_bht[i] = WN;
+      for (int i = 0; i < LOCAL_HISTORY_TABLE_SIZE; i++) local_history_table[i] = 0;
       break;
   }
 }
@@ -115,7 +144,16 @@ make_prediction(uint32_t pc)
 
       return choice_table[global_index] >= WT ? global_pred : local_pred;
     }
-    case CUSTOM:
+    case CUSTOM: {
+      uint32_t global_idx = global_history & (GLOBAL_PHT_SIZE - 1);
+      uint32_t local_idx = pc & (LOCAL_HISTORY_TABLE_SIZE - 1);
+      uint8_t local_hist = local_history_table[local_idx];
+
+      uint8_t local_pred = get_prediction(local_bht[local_hist]);
+      uint8_t global_pred = get_prediction(global_bht[global_idx]);
+
+      return (choice_table[global_idx] >= WT) ? global_pred : local_pred;
+    }
     default:
       break;
   }
@@ -172,8 +210,27 @@ void train_predictor(uint32_t pc, uint8_t outcome)
       break;
     }
 
-    case CUSTOM:
+    case CUSTOM:{
+      uint32_t global_idx = global_history & (GLOBAL_PHT_SIZE - 1);
+      uint32_t local_idx = pc & (LOCAL_HISTORY_TABLE_SIZE - 1);
+      uint8_t local_hist = local_history_table[local_idx];
+
+      uint8_t local_pred = get_prediction(local_bht[local_hist]);
+      uint8_t global_pred = get_prediction(global_bht[global_idx]);
+
+      local_bht[local_hist] = update_counter(local_bht[local_hist], outcome);
+      global_bht[global_idx] = update_counter(global_bht[global_idx], outcome);
+
+      if (local_pred != global_pred) {
+        if (global_pred == outcome && choice_table[global_idx] < ST)
+          choice_table[global_idx]++;
+        else if (local_pred == outcome && choice_table[global_idx] > SN)
+          choice_table[global_idx]--;
+      }
+      local_history_table[local_idx] = ((local_hist << 1) | outcome) & (LOCAL_PHT_SIZE - 1);
+      global_history = ((global_history << 1) | outcome) & (GLOBAL_PHT_SIZE - 1);
       break;
+    }
   }
 }
 
